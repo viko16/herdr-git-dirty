@@ -1,0 +1,15 @@
+id = "viko16.git-dirty"
+name = "Git Dirty"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "Show the number of uncommitted files in each Herdr Space"
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["bash", "bin/start.sh"]
+
+# A newly installed plugin does not run its startup hook until Herdr restarts.
+# This event makes the poller start as soon as the user switches Spaces instead.
+[[events]]
+on = "workspace.focused"
+command = ["bash", "bin/start.sh"]
