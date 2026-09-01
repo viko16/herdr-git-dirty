@@ -35,8 +35,13 @@ is_running() {
 
 is_running && exit 0
 
-# mkdir is an atomic, portable lock on both macOS and Linux.
-mkdir "$lock_dir" 2>/dev/null || exit 0
+# mkdir is an atomic, portable lock on both macOS and Linux. Recover an empty
+# stale lock left behind if a previous start process was interrupted.
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  is_running && exit 0
+  rmdir "$lock_dir" 2>/dev/null || exit 0
+  mkdir "$lock_dir" 2>/dev/null || exit 0
+fi
 trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
 
 is_running && exit 0

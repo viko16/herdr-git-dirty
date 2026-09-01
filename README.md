@@ -31,6 +31,8 @@ Then reload the configuration:
 herdr server reload-config
 ```
 
+After installing, switch Spaces once or restart Herdr to start the plugin.
+
 ## Use
 
 No command is needed. Open Herdr normally; each dirty Space will show `*N` in

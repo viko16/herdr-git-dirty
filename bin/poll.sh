@@ -11,6 +11,7 @@ readonly source_id="viko16.git-dirty"
 readonly herdr="${HERDR_BIN_PATH:-herdr}"
 readonly state_dir="${HERDR_PLUGIN_STATE_DIR:-${TMPDIR:-/tmp}/herdr-git-dirty}"
 readonly pid_file="${1:?missing pid file}"
+readonly plugin_root="${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 mkdir -p "$state_dir" || exit 1
 cache_file="$(mktemp "$state_dir/cache.XXXXXX")" || exit 1
@@ -49,7 +50,41 @@ report_state() {
   fi
 }
 
+plugin_is_enabled() {
+  local plugins enabled
+
+  [ -f "$plugin_root/herdr-plugin.toml" ] || return 1
+
+  # If the registry cannot be read temporarily, keep running. Exit only when
+  # Herdr definitively reports that the plugin is disabled or uninstalled.
+  if ! plugins="$("$herdr" plugin list --plugin "$source_id" --json 2>/dev/null)"; then
+    return 0
+  fi
+  enabled="$(printf '%s' "$plugins" | jq -r --arg id "$source_id" '
+    [ .result.plugins[]? | select(.plugin_id == $id) ][0].enabled // false
+  ' 2>/dev/null)" || return 0
+  [ "$enabled" = "true" ]
+}
+
+clear_all_tokens() {
+  local snapshot workspace_id
+  snapshot="$("$herdr" api snapshot 2>/dev/null)" || return 0
+
+  printf '%s' "$snapshot" | jq -r '.result.snapshot.workspaces[]?.workspace_id' \
+    2>/dev/null | while IFS= read -r workspace_id; do
+      [ -n "$workspace_id" ] && report_state "$workspace_id" clear
+    done
+}
+
+plugin_check_count=0
+
 while :; do
+  if [ "$plugin_check_count" -eq 0 ] && ! plugin_is_enabled; then
+    clear_all_tokens
+    exit 0
+  fi
+  plugin_check_count=$(( (plugin_check_count + 1) % 10 ))
+
   if ! snapshot="$("$herdr" api snapshot 2>/dev/null)"; then
     sleep "$interval_seconds"
     continue
