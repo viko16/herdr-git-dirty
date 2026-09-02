@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Poll every Herdr Space and publish a $dirty workspace metadata token. The
+# Poll every Herdr Space and publish a $git_dirty workspace metadata token. The
 # value is "*N" for a dirty Git worktree and absent for clean/non-Git Spaces.
 
 set -u
@@ -43,10 +43,10 @@ report_state() {
 
   if [ "$state" = "clear" ]; then
     "$herdr" workspace report-metadata "$workspace_id" \
-      --source "$source_id" --clear-token dirty >/dev/null 2>&1
+      --source "$source_id" --clear-token git_dirty >/dev/null 2>&1
   else
     "$herdr" workspace report-metadata "$workspace_id" \
-      --source "$source_id" --token "dirty=$state" >/dev/null 2>&1
+      --source "$source_id" --token "git_dirty=$state" >/dev/null 2>&1
   fi
 }
 

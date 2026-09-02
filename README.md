@@ -15,13 +15,13 @@ Requirements: Herdr 0.7.5 or newer, Git, Bash, and `jq`.
 herdr plugin install viko16/herdr-git-dirty
 ```
 
-Add `$dirty` to the Space rows in `~/.config/herdr/config.toml`:
+Add `$git_dirty` to the Space rows in `~/.config/herdr/config.toml`:
 
 ```toml
 [ui.sidebar.spaces]
 rows = [
   ["state_icon", "workspace"],
-  ["branch", "git_status", { token = "$dirty", fg = "#ff5f56" }],
+  ["branch", "git_status", { token = "$git_dirty", fg = "#ff5f56" }],
 ]
 ```
 
@@ -45,4 +45,4 @@ To uninstall:
 herdr plugin uninstall viko16.git-dirty
 ```
 
-Remove `$dirty` from `ui.sidebar.spaces.rows` after uninstalling.
+Remove `$git_dirty` from `ui.sidebar.spaces.rows` after uninstalling.
