@@ -5,7 +5,9 @@ A small Herdr plugin that shows the number of uncommitted files in each Space.
 Dirty repositories display `*N` (for example, `*3`). Clean repositories and
 non-Git Spaces display nothing. Staged, unstaged, deleted, renamed, and
 untracked files are included; ignored files are not. The status refreshes every
-3 seconds.
+3 seconds after each polling cycle finishes. Spaces pointing at the same
+worktree share one Git status scan per cycle; linked worktrees are scanned
+separately. Successfully reported tokens and cwd mappings are cached in memory.
 
 ## Install
 
@@ -46,3 +48,10 @@ herdr plugin uninstall viko16.git-dirty
 ```
 
 Remove `$git_dirty` from `ui.sidebar.spaces.rows` after uninstalling.
+
+## Development
+
+Run `python3 tests/poll.py` for isolated integration checks using real Git and a
+mock Herdr CLI. Add `--benchmark` for two 60-second runs comparing the original
+poller (`e936466`) with the current implementation. The harness requires Python 3
+and leaves its fixtures in `/tmp`; it does not start or enable a Herdr plugin.

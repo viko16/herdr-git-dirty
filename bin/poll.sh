@@ -14,7 +14,11 @@ readonly pid_file="${1:?missing pid file}"
 readonly plugin_root="${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 mkdir -p "$state_dir" || exit 1
-cache_file="$(mktemp "$state_dir/cache.XXXXXX")" || exit 1
+# Index zero is a sentinel, keeping empty arrays compatible with Bash 3.2 -u.
+cached_ids=("")
+cached_states=("")
+mapped_cwds=("")
+mapped_roots=("")
 
 cleanup() {
   local recorded_pid=""
@@ -24,17 +28,45 @@ cleanup() {
   if [ "$recorded_pid" = "$$" ]; then
     rm -f "$pid_file"
   fi
-  rm -f "$cache_file"
 }
 trap cleanup EXIT
 trap 'exit 0' INT TERM HUP
 
-cached_state() {
-  local workspace_id="$1"
-  awk -F '\t' -v id="$workspace_id" '
-    $1 == id { print $2; found = 1; exit }
-    END { if (!found) exit 1 }
-  ' "$cache_file"
+find_index() {
+  local needle="$1" item
+  shift
+  found_index=0
+  for item in "$@"; do
+    [ "$item" = "$needle" ] && return 0
+    found_index=$((found_index + 1))
+  done
+  return 1
+}
+
+resolve_root() {
+  local cwd="$1" candidate path
+  root=""
+  if find_index "$cwd" "${mapped_cwds[@]}"; then
+    candidate="${mapped_roots[$found_index]}"
+    path="$cwd"
+    # Detect removed repositories and newly created nested repositories without
+    # another Git process. Never key linked worktrees by their common directory.
+    while [ "$path" != "$candidate" ] && [ "$path" != / ]; do
+      [ -e "$path/.git" ] && break
+      path="${path%/*}"
+      [ -n "$path" ] || path=/
+    done
+    if [ "$path" = "$candidate" ] && [ -e "$candidate/.git" ]; then
+      root="$candidate"
+      return
+    fi
+  fi
+  root="$(git --no-optional-locks -C "$cwd" rev-parse --show-toplevel 2>/dev/null && printf '.')" || return 1
+  root="${root%.}"
+  root="${root%$'\n'}"
+  # Canonicalize symlinks so different spellings share the same scan.
+  root="$(cd -P "$root" && printf '%s.' "$PWD")" || return 1
+  root="${root%.}"
 }
 
 report_state() {
@@ -90,50 +122,108 @@ while :; do
     continue
   fi
 
-  if ! printf '%s' "$snapshot" | jq -e '.result.snapshot' >/dev/null 2>&1; then
+  workspace_ids=("")
+  workspace_cwds=("")
+  parsed=false
+  while IFS= read -r -d '' workspace_id && IFS= read -r -d '' cwd; do
+    if [ "$workspace_id" = "" ]; then
+      parsed=true
+      break
+    fi
+    workspace_ids+=("$workspace_id")
+    workspace_cwds+=("$cwd")
+  done < <(
+    printf '%s' "$snapshot" | jq -j '
+      .result.snapshot
+      | if type != "object" or (.workspaces | type) != "array"
+          or ((.panes // []) | type) != "array"
+        then error("invalid snapshot") else . end
+      | . as $snapshot
+      | ($snapshot.panes // []) as $panes
+      | $snapshot.workspaces[]
+      | .workspace_id as $workspace_id
+      | ([ $panes[] | select(.workspace_id == $workspace_id and .focused) ][0]
+         // [ $panes[] | select(.workspace_id == $workspace_id) ][0]) as $pane
+      | ($pane.cwd // "") as $cwd
+      | if ($workspace_id | type) != "string" or $workspace_id == ""
+          or ($workspace_id | contains("\u0000"))
+          or ($cwd | type) != "string" or ($cwd | contains("\u0000"))
+        then error("invalid workspace")
+        else $workspace_id, "\u0000", $cwd, "\u0000" end
+    ' 2>/dev/null && printf '\0\0'
+  )
+  # The success sentinel carries jq failure across process substitution. Discard
+  # partial output on failure without modifying any previously reported state.
+  if [ "$parsed" != true ]; then
     sleep "$interval_seconds"
     continue
   fi
 
-  next_cache="$(mktemp "$state_dir/cache.XXXXXX")" || exit 1
-
-  while IFS= read -r -d '' workspace_id && IFS= read -r -d '' cwd; do
+  next_ids=("")
+  next_states=("")
+  next_cwds=("")
+  next_roots=("")
+  scanned_roots=("")
+  scanned_states=("")
+  for ((i=1; i<${#workspace_ids[@]}; i++)); do
+    workspace_id="${workspace_ids[$i]}"
+    cwd="${workspace_cwds[$i]}"
     # A pane may not have a cwd yet during session restore. Retry next cycle
     # instead of clearing a potentially valid token during that short race.
     [ -n "$cwd" ] || continue
 
-    if count="$(LC_ALL=C git --no-optional-locks -C "$cwd" status \
-      --porcelain=v1 --untracked-files=all 2>/dev/null | awk 'END { print NR }')"; then
-      if [ "$count" -gt 0 ]; then
-        state="*$count"
+    state=clear
+    # Appending a marker preserves cwd paths ending in newlines through command
+    # substitution, which otherwise strips trailing newlines.
+    if canonical="$(cd -P "$cwd" 2>/dev/null && printf '%s.' "$PWD")"; then
+      cwd="${canonical%.}"
+      if find_index "$cwd" "${next_cwds[@]}"; then
+        root="${next_roots[$found_index]}"
+      elif resolve_root "$cwd"; then
+        next_cwds+=("$cwd")
+        next_roots+=("$root")
       else
-        state="clear"
+        root=""
+        next_cwds+=("$cwd")
+        next_roots+=("")
       fi
-    else
-      state="clear"
+      if [ -n "$root" ]; then
+        if find_index "$root" "${scanned_roots[@]}"; then
+          state="${scanned_states[$found_index]}"
+        elif status="$(LC_ALL=C git --no-optional-locks -C "$root" status \
+          --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+          count=0
+          if [ -n "$status" ]; then
+            while IFS= read -r line; do count=$((count + 1)); done <<< "$status"
+          fi
+          [ "$count" -eq 0 ] || state="*$count"
+          scanned_roots+=("$root")
+          scanned_states+=("$state")
+        else
+          # Force identity resolution after a failed scan.
+          mapped_cwds=("")
+          next_cwds=("")
+          next_roots=("")
+        fi
+      fi
     fi
 
-    if previous="$(cached_state "$workspace_id")" && [ "$previous" = "$state" ]; then
-      printf '%s\t%s\n' "$workspace_id" "$state" >> "$next_cache"
+    if find_index "$workspace_id" "${cached_ids[@]}" && [ "${cached_states[$found_index]}" = "$state" ]; then
+      next_ids+=("$workspace_id")
+      next_states+=("$state")
       continue
     fi
 
     # Do not cache a failed report, so the next cycle retries it.
     if report_state "$workspace_id" "$state"; then
-      printf '%s\t%s\n' "$workspace_id" "$state" >> "$next_cache"
+      next_ids+=("$workspace_id")
+      next_states+=("$state")
     fi
-  done < <(
-    printf '%s' "$snapshot" | jq -j '
-      .result.snapshot as $snapshot
-      | ($snapshot.panes // []) as $panes
-      | ($snapshot.workspaces // [])[]
-      | .workspace_id as $workspace_id
-      | ([ $panes[] | select(.workspace_id == $workspace_id and .focused) ][0]
-         // [ $panes[] | select(.workspace_id == $workspace_id) ][0]) as $pane
-      | $workspace_id, "\u0000", ($pane.cwd // ""), "\u0000"
-    ' 2>/dev/null
-  )
+  done
 
-  mv "$next_cache" "$cache_file"
+  cached_ids=("${next_ids[@]}")
+  cached_states=("${next_states[@]}")
+  mapped_cwds=("${next_cwds[@]}")
+  mapped_roots=("${next_roots[@]}")
   sleep "$interval_seconds"
 done
