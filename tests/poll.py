@@ -130,15 +130,16 @@ def main():
         s.wait_for(lambda: len(s.reports()) >= 5)
         assert all('--token git_dirty=*4' in line for line in s.reports()[:3])
         assert all('--clear-token' in line for line in s.reports()[3:5])
-        time.sleep(.3)
+        s.wait_for(lambda: s.log.read_text().splitlines().count('herdr api snapshot') >= 3)
         assert len(s.reports()) == 5
         calls = s.log.read_text().splitlines()
         assert sum('rev-parse' in c for c in calls if c.startswith('git')) >= 4
-        assert not any(c in ('awk', 'mktemp', 'mv') for c in calls)
+        assert not any(c in ('mktemp', 'mv') for c in calls)
         rounds = [i for i, call in enumerate(calls) if call == 'herdr api snapshot']
         assert len(rounds) >= 2
         for start, end in zip(rounds, rounds[1:]):
             assert calls[start:end].count('git status') == 2
+            assert calls[start:end].count('awk') == 2
         # Invalid/partial snapshots and empty cwd must not clear existing tokens.
         s.set_snapshot({'result': {'snapshot': {'workspaces': [{'workspace_id': '0'}, {}], 'panes': []}}})
         time.sleep(.2)
@@ -175,7 +176,8 @@ def main():
         else:
             s.stderr.close()
             assert not (s.directory / 'stderr').read_text()
-    print('PASS integration (Bash 3.2); fixtures:', base, flush=True)
+    bash_version = run('/bin/bash', '-c', 'printf "%s" "$BASH_VERSION"')
+    print(f'PASS integration (Bash {bash_version}); fixtures:', base, flush=True)
     latency = Session(base / 'latency', script, fast=False)
     latency.set_cwds([linked])
     latency.start()

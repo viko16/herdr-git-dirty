@@ -190,12 +190,8 @@ while :; do
       if [ -n "$root" ]; then
         if find_index "$root" "${scanned_roots[@]}"; then
           state="${scanned_states[$found_index]}"
-        elif status="$(LC_ALL=C git --no-optional-locks -C "$root" status \
-          --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
-          count=0
-          if [ -n "$status" ]; then
-            while IFS= read -r line; do count=$((count + 1)); done <<< "$status"
-          fi
+        elif count="$(LC_ALL=C git --no-optional-locks -C "$root" status \
+          --porcelain=v1 --untracked-files=all 2>/dev/null | awk 'END { print NR }')"; then
           [ "$count" -eq 0 ] || state="*$count"
           scanned_roots+=("$root")
           scanned_states+=("$state")
