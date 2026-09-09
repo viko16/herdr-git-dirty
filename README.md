@@ -11,7 +11,7 @@ separately. Successfully reported tokens and cwd mappings are cached in memory.
 
 ## Install
 
-Requirements: Herdr 0.7.5 or newer, Git, Bash, and `jq`.
+Requirements: Herdr 0.7.5 or newer, Git, Bash, `jq`, and `awk`.
 
 ```bash
 herdr plugin install viko16/herdr-git-dirty
@@ -53,5 +53,8 @@ Remove `$git_dirty` from `ui.sidebar.spaces.rows` after uninstalling.
 
 Run `python3 tests/poll.py` for isolated integration checks using real Git and a
 mock Herdr CLI. Add `--benchmark` for two 60-second runs comparing the original
-poller (`e936466`) with the current implementation. The harness requires Python 3
-and leaves its fixtures in `/tmp`; it does not start or enable a Herdr plugin.
+poller (`e936466`) with the current implementation; this requires that commit
+to be available in local Git history. The harness requires Python 3, runs the
+poller with `/bin/bash`, and leaves its fixtures in `/tmp`; it does not start or
+enable a Herdr plugin. Benchmark results include mock CLI and wrapper overhead
+and depend on the local machine and worktree contents.
