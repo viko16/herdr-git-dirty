@@ -7,7 +7,9 @@ non-Git Spaces display nothing. Staged, unstaged, deleted, renamed, and
 untracked files are included; ignored files are not. The status refreshes every
 3 seconds after each polling cycle finishes. Spaces pointing at the same
 worktree share one Git status scan per cycle; linked worktrees are scanned
-separately. Successfully reported tokens and cwd mappings are cached in memory.
+separately. Cwd mappings are cached in memory. Each cycle compares the current
+server token with the Git status and only reports differences, restoring missing
+tokens after a server restart even when the poller keeps running.
 
 ## Install
 
@@ -58,3 +60,4 @@ to be available in local Git history. The harness requires Python 3, runs the
 poller with `/bin/bash`, and leaves its fixtures in `/tmp`; it does not start or
 enable a Herdr plugin. Benchmark results include mock CLI and wrapper overhead
 and depend on the local machine and worktree contents.
+Use `--benchmark --baseline HEAD` to compare against the current commit instead.

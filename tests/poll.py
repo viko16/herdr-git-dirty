@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections import Counter
@@ -26,6 +27,8 @@ class Session:
         self.log = directory / 'calls'
         self.snapshot = directory / 'snapshot.json'
         self.snapshot.write_text('{"result":{"snapshot":{"workspaces":[],"panes":[]}}}')
+        self.tokens = directory / 'tokens'
+        self.tokens.mkdir()
         wrappers = directory / 'bin'
         wrappers.mkdir()
         for name in ('git', 'jq', 'awk', 'mktemp', 'mv'):
@@ -35,17 +38,44 @@ class Session:
             wrapper.write_text('#!/bin/bash\nprintf "%s\\n" "' + label + '" >> "$TEST_DIR/calls"\nexec "' + real + '" "$@"\n')
             wrapper.chmod(0o755)
         herdr = wrappers / 'herdr'
-        herdr.write_text('''#!/bin/bash
-printf '%s\\n' "herdr $*" >> "$TEST_DIR/calls"
-case "$1 $2" in
-  'plugin list')
-    if [ -f "$TEST_DIR/disabled" ]; then enabled=false; else enabled=true; fi
-    printf '{"result":{"plugins":[{"plugin_id":"viko16.git-dirty","enabled":%s}]}}' "$enabled" ;;
-  'api snapshot') cat "$TEST_DIR/snapshot.json" ;;
-  'workspace report-metadata')
-    [ ! -f "$TEST_DIR/fail-report" ] || exit 1
-    printf '%s\\n' "$*" >> "$TEST_DIR/reports" ;;
-esac
+        herdr.write_text('#!' + sys.executable + '\n' + '''import json
+import os
+from pathlib import Path
+import sys
+
+directory = Path(os.environ['TEST_DIR'])
+args = sys.argv[1:]
+with (directory / 'calls').open('a') as log:
+    print('herdr ' + ' '.join(args), file=log)
+if args[:2] == ['plugin', 'list']:
+    print(json.dumps({'result': {'plugins': [{'plugin_id': 'viko16.git-dirty',
+          'enabled': not (directory / 'disabled').exists()}]}}))
+elif args == ['api', 'snapshot']:
+    if (directory / 'fail-snapshot').exists():
+        sys.exit(1)
+    snapshot = json.loads((directory / 'snapshot.json').read_text())
+    for workspace in snapshot['result']['snapshot']['workspaces']:
+        path = directory / 'tokens' / workspace.get('workspace_id', 'missing')
+        if path.is_file():
+            tokens = json.loads(path.read_text())
+            if tokens:
+                workspace.setdefault('tokens', tokens)
+    print(json.dumps(snapshot))
+elif args[:2] == ['workspace', 'report-metadata']:
+    if (directory / 'fail-report').exists():
+        sys.exit(1)
+    path = directory / 'tokens' / args[2]
+    tokens = json.loads(path.read_text()) if path.exists() else {}
+    if '--clear-token' in args:
+        tokens.pop(args[args.index('--clear-token') + 1], None)
+    else:
+        key, value = args[args.index('--token') + 1].split('=', 1)
+        tokens[key] = value
+    pending = path.with_suffix('.pending')
+    pending.write_text(json.dumps(tokens))
+    pending.replace(path)
+    with (directory / 'reports').open('a') as log:
+        print(' '.join(args), file=log)
 ''')
         herdr.chmod(0o755)
         if fast:
@@ -59,10 +89,19 @@ esac
         self.process = None
 
     def set_cwds(self, cwds):
+        for path in self.tokens.iterdir():
+            if path.name not in {str(i) for i in range(len(cwds))}:
+                self.set_tokens(path.name)
         self.set_snapshot({'result': {'snapshot': {
             'workspaces': [{'workspace_id': str(i)} for i in range(len(cwds))],
             'panes': [{'workspace_id': str(i), 'cwd': str(cwd), 'focused': True}
                       for i, cwd in enumerate(cwds)]}}})
+
+    def set_tokens(self, workspace_id, **tokens):
+        path = self.tokens / str(workspace_id)
+        pending = path.with_suffix('.pending')
+        pending.write_text(json.dumps(tokens))
+        pending.replace(path)
 
     def set_snapshot(self, value):
         pending = self.directory / 'pending.json'
@@ -99,6 +138,7 @@ esac
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--benchmark', action='store_true')
+    parser.add_argument('--baseline', default='e936466', help='Git ref for --benchmark comparison')
     args = parser.parse_args()
     # Leave fixtures in /tmp for inspection; no user repositories or sessions.
     base = Path(tempfile.mkdtemp(prefix='git-dirty-test-', dir='/tmp'))
@@ -125,6 +165,8 @@ def main():
     script = ROOT / 'bin/poll.sh'
     s = Session(base / 'checks', script)
     s.set_cwds([repo, subdir, alias, linked, base, ''])
+    s.set_tokens('3', git_dirty='*1')
+    s.set_tokens('4', git_dirty='*2', unrelated='keep')
     s.start()
     try:
         s.wait_for(lambda: len(s.reports()) >= 5)
@@ -140,18 +182,44 @@ def main():
         for start, end in zip(rounds, rounds[1:]):
             assert calls[start:end].count('git status') == 2
             assert calls[start:end].count('awk') == 2
+            assert calls[start:end].count('jq') == 1
+        assert json.loads((s.tokens / '4').read_text()) == {'unrelated': 'keep'}
+        # A fast restart can erase metadata without any failed snapshot request.
+        s.set_tokens('0')
+        s.wait_for(lambda: len(s.reports()) == 6)
+        assert '--token git_dirty=*4' in s.reports()[-1]
+        s.set_tokens('0', git_dirty='*99')
+        s.wait_for(lambda: len(s.reports()) == 7)
+        assert '--token git_dirty=*4' in s.reports()[-1]
+        # An already clean/non-Git Space must also clear a stale server token.
+        s.set_tokens('4', git_dirty='*99', unrelated='keep')
+        s.wait_for(lambda: len(s.reports()) == 8)
+        assert '--clear-token git_dirty' in s.reports()[-1]
+        # Retry a lost token after a disconnect and a failed recovery report.
+        (s.directory / 'fail-snapshot').touch()
+        time.sleep(.2)
+        s.set_tokens('0')
+        (s.directory / 'fail-report').touch()
+        (s.directory / 'fail-snapshot').unlink()
+        time.sleep(.2)
+        assert len(s.reports()) == 8
+        (s.directory / 'fail-report').unlink()
+        s.wait_for(lambda: len(s.reports()) == 9)
+        time.sleep(.2)
+        assert len(s.reports()) == 9
+        before = len(s.reports())
         # Invalid/partial snapshots and empty cwd must not clear existing tokens.
         s.set_snapshot({'result': {'snapshot': {'workspaces': [{'workspace_id': '0'}, {}], 'panes': []}}})
         time.sleep(.2)
-        assert len(s.reports()) == 5
+        assert len(s.reports()) == before
         s.set_cwds([''])
         time.sleep(.2)
-        assert len(s.reports()) == 5
+        assert len(s.reports()) == before
         s.set_cwds([repo])
         (s.directory / 'fail-report').touch()
         (repo / 'extra').write_text('extra')
         time.sleep(.2)
-        assert len(s.reports()) == 5
+        assert len(s.reports()) == before
         (s.directory / 'fail-report').unlink()
         s.wait_for(lambda: any('git_dirty=*5' in r for r in s.reports()))
         run('git', '-C', str(repo), 'add', '.')
@@ -180,6 +248,7 @@ def main():
     print(f'PASS integration (Bash {bash_version}); fixtures:', base, flush=True)
     latency = Session(base / 'latency', script, fast=False)
     latency.set_cwds([linked])
+    latency.set_tokens('0', git_dirty='*1')
     latency.start()
     try:
         latency.wait_for(lambda: bool(latency.reports()))
@@ -194,7 +263,7 @@ def main():
         latency.stop()
     if args.benchmark:
         baseline = base / 'baseline.sh'
-        baseline.write_text(run('git', '-C', str(ROOT), 'show', 'e936466:bin/poll.sh') + '\n')
+        baseline.write_text(run('git', '-C', str(ROOT), 'show', args.baseline + ':bin/poll.sh') + '\n')
         for label, target in [('baseline', baseline), ('optimized', script)]:
             session = Session(base / label, target, fast=False)
             session.set_cwds([repo, repo, repo, repo, linked])

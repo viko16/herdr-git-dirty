@@ -15,8 +15,6 @@ readonly plugin_root="${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/
 
 mkdir -p "$state_dir" || exit 1
 # Index zero is a sentinel, keeping empty arrays compatible with Bash 3.2 -u.
-cached_ids=("")
-cached_states=("")
 mapped_cwds=("")
 mapped_roots=("")
 
@@ -124,14 +122,16 @@ while :; do
 
   workspace_ids=("")
   workspace_cwds=("")
+  workspace_tokens=("")
   parsed=false
-  while IFS= read -r -d '' workspace_id && IFS= read -r -d '' cwd; do
+  while IFS= read -r -d '' workspace_id && IFS= read -r -d '' cwd && IFS= read -r -d '' token; do
     if [ "$workspace_id" = "" ]; then
       parsed=true
       break
     fi
     workspace_ids+=("$workspace_id")
     workspace_cwds+=("$cwd")
+    workspace_tokens+=("$token")
   done < <(
     printf '%s' "$snapshot" | jq -j '
       .result.snapshot
@@ -142,15 +142,17 @@ while :; do
       | ($snapshot.panes // []) as $panes
       | $snapshot.workspaces[]
       | .workspace_id as $workspace_id
+      | (.tokens.git_dirty // "") as $token
       | ([ $panes[] | select(.workspace_id == $workspace_id and .focused) ][0]
          // [ $panes[] | select(.workspace_id == $workspace_id) ][0]) as $pane
       | ($pane.cwd // "") as $cwd
       | if ($workspace_id | type) != "string" or $workspace_id == ""
           or ($workspace_id | contains("\u0000"))
           or ($cwd | type) != "string" or ($cwd | contains("\u0000"))
+          or ($token | type) != "string" or ($token | contains("\u0000"))
         then error("invalid workspace")
-        else $workspace_id, "\u0000", $cwd, "\u0000" end
-    ' 2>/dev/null && printf '\0\0'
+        else $workspace_id, "\u0000", $cwd, "\u0000", $token, "\u0000" end
+    ' 2>/dev/null && printf '\0\0\0'
   )
   # The success sentinel carries jq failure across process substitution. Discard
   # partial output on failure without modifying any previously reported state.
@@ -159,8 +161,6 @@ while :; do
     continue
   fi
 
-  next_ids=("")
-  next_states=("")
   next_cwds=("")
   next_roots=("")
   scanned_roots=("")
@@ -204,21 +204,18 @@ while :; do
       fi
     fi
 
-    if find_index "$workspace_id" "${cached_ids[@]}" && [ "${cached_states[$found_index]}" = "$state" ]; then
-      next_ids+=("$workspace_id")
-      next_states+=("$state")
+    # Server tokens are ephemeral across restarts, even if this poller survives.
+    # Compare the current snapshot rather than trusting a previous report.
+    token="${workspace_tokens[$i]}"
+    if { [ "$state" = clear ] && [ -z "$token" ]; } ||
+       { [ "$state" != clear ] && [ "$token" = "$state" ]; }; then
       continue
     fi
 
-    # Do not cache a failed report, so the next cycle retries it.
-    if report_state "$workspace_id" "$state"; then
-      next_ids+=("$workspace_id")
-      next_states+=("$state")
-    fi
+    # A failed report leaves a mismatch for the next cycle to retry.
+    report_state "$workspace_id" "$state"
   done
 
-  cached_ids=("${next_ids[@]}")
-  cached_states=("${next_states[@]}")
   mapped_cwds=("${next_cwds[@]}")
   mapped_roots=("${next_roots[@]}")
   sleep "$interval_seconds"
