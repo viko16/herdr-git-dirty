@@ -51,11 +51,41 @@ os.execv(''' + repr(real) + ''', ['git'] + args)
 def assert_dead(pid):
     # macOS may briefly retain a reparented zombie; it cannot run or hold pipes.
     result = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)], text=True, capture_output=True)
+    assert result.returncode in (0, 1) and not result.stderr, result
     assert not result.stdout.strip() or result.stdout.strip().startswith('Z'), (pid, result.stdout)
+
+
+def check_normal_completion(base):
+    # A successful/failing command can leave a child holding stdout open. The
+    # supervisor must clean it up before reaping its own group leader, without
+    # changing the command status or waiting for the full command deadline.
+    for code in (0, 7, -signal.SIGUSR1):
+        pidfile = base / ('normal-' + str(code))
+        command = ("import os, signal, subprocess, sys; from pathlib import Path; "
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(60)']); "
+            "Path(" + repr(str(pidfile)) + ").write_text("
+            "str(os.getpid()) + ' ' + str(os.getpgrp()) + ' ' + str(child.pid)); "
+            "print('complete', flush=True); " +
+            ("os.kill(os.getpid(), " + str(-code) + ")" if code < 0 else
+             "sys.exit(" + str(code) + ")"))
+        started = time.monotonic()
+        proc = subprocess.run(['perl', str(ROOT / 'bin/bounded.pl'), '5',
+                               sys.executable, '-c', command],
+                              text=True, capture_output=True, timeout=3)
+        assert proc.returncode == (128 - code if code < 0 else code), proc
+        assert proc.stdout == 'complete\n' and not proc.stderr, proc
+        assert time.monotonic() - started < 3
+        command_pid, group_pid, child_pid = map(int, pidfile.read_text().split())
+        assert command_pid != group_pid  # leader is the retained supervisor
+        for pid in (command_pid, group_pid, child_pid):
+            assert_dead(pid)
+    print('PASS normal success/error/signal status and lingering stdout-child cleanup')
 
 
 def main():
     base = Path(tempfile.mkdtemp(prefix='git-dirty-reliability-', dir='/tmp'))
+    check_normal_completion(base)
     bad, good, nongit = [base / name for name in ('bad', 'good', 'nongit')]
     for repo in (bad, good):
         repo.mkdir()
