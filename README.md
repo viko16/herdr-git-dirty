@@ -11,9 +11,27 @@ separately. Cwd mappings are cached in memory. Each cycle compares the current
 server token with the Git status and only reports differences, restoring missing
 tokens after a server restart even when the poller keeps running.
 
+Failed or timed-out Git commands leave the current token unchanged (unknown).
+Each Git discovery/status command has a 5-second deadline; its process group is
+terminated on timeout. Failed status scans are shared across Spaces and retried
+after 3, 6, 12, 24, then at most 30 seconds, rechecking only the affected root
+mappings. Scanning stays serial, so a slow worktree can delay following Spaces
+by up to the command deadline; multiple slow worktrees add up. Herdr CLI calls
+and filesystem operations are not given deadlines. Shutdown during a Git scan
+can wait for its deadline and cleanup.
+
+Non-Git cwd results are cached for 30 seconds. Ancestor `.git` checks on every
+cycle detect newly initialized parent/nested repositories immediately. Ambiguous
+discovery failures (including inaccessible directories or broken Git markers)
+retain tokens instead of being cached as non-Git. A kernel file lock is held for
+the poller's lifetime; its file is deliberately never deleted. PID files are
+informational, not used as evidence of lock ownership. Existing pollers from
+older plugin versions should be restarted with Herdr when upgrading.
+
 ## Install
 
-Requirements: Herdr 0.7.5 or newer, Git, Bash, `jq`, and `awk`.
+Requirements: Herdr 0.7.5 or newer, Git, Bash (3.2 or newer), `jq`, `awk`, and Perl with its core
+`Fcntl`, `POSIX`, and `Time::HiRes` modules. No `flock` executable is required.
 
 ```bash
 herdr plugin install viko16/herdr-git-dirty
@@ -53,8 +71,25 @@ Remove `$git_dirty` from `ui.sidebar.spaces.rows` after uninstalling.
 
 ## Development
 
-Run `python3 tests/poll.py` for isolated integration checks using real Git and a
-mock Herdr CLI. Add `--benchmark` for two 60-second runs comparing the original
+Run the complete isolated suite using real Git and a mock Herdr CLI:
+
+```sh
+/bin/bash -n bin/start.sh bin/poll.sh
+perl -c bin/lock.pl
+perl -c bin/bounded.pl
+python3 tests/lifecycle.py
+python3 tests/poll.py
+PYTHONDONTWRITEBYTECODE=1 python3 tests/reliability.py
+git diff --check
+```
+
+The tests cover concurrent startup and crash recovery, shared failures and
+backoff, token preservation, timeout/descendant cleanup, non-Git caching and
+subsequent `git init`, plus the existing counting and server-restart regressions.
+GitHub Actions runs this suite on macOS and Linux. Call-count assertions measure
+mock command budgets, not real-world speedups.
+
+Use `python3 tests/poll.py --benchmark` for two 60-second runs comparing the original
 poller (`e936466`) with the current implementation; this requires that commit
 to be available in local Git history. The harness requires Python 3, runs the
 poller with `/bin/bash`, and leaves its fixtures in `/tmp`; it does not start or
