@@ -1,0 +1,29 @@
+name: Tests
+on:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  integration:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and whitespace
+        run: |
+          /bin/bash -n bin/start.sh bin/poll.sh
+          perl -c bin/lock.pl
+          perl -c bin/bounded.pl
+          git diff --check
+      - name: Isolated integration tests
+        run: |
+          python3 tests/lifecycle.py
+          python3 tests/poll.py
+          python3 tests/reliability.py
