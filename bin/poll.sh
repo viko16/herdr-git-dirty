@@ -29,6 +29,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 0' INT TERM HUP
+printf '%s\n' "$$" > "$pid_file" || exit 1
 
 find_index() {
   local needle="$1" item
