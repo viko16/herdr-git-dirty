@@ -13,7 +13,10 @@ tokens after a server restart even when the poller keeps running.
 
 Failed or timed-out Git commands leave the current token unchanged (unknown).
 Each Git discovery/status command has a 5-second deadline; its process group is
-terminated on timeout. Failed status scans are shared across Spaces and retried
+terminated on timeout. A short-lived supervisor retains the process-group
+identity until cleanup finishes, including on normal completion; descendants
+left in that group are killed so inherited output pipes cannot hold up polling.
+Failed status scans are shared across Spaces and retried
 after 3, 6, 12, 24, then at most 30 seconds, rechecking only the affected root
 mappings. Scanning stays serial, so a slow worktree can delay following Spaces
 by up to the command deadline; multiple slow worktrees add up. Herdr CLI calls
@@ -25,8 +28,9 @@ cycle detect newly initialized parent/nested repositories immediately. Ambiguous
 discovery failures (including inaccessible directories or broken Git markers)
 retain tokens instead of being cached as non-Git. A kernel file lock is held for
 the poller's lifetime; its file is deliberately never deleted. PID files are
-informational, not used as evidence of lock ownership. Existing pollers from
-older plugin versions should be restarted with Herdr when upgrading.
+informational, not used as evidence of lock ownership. The lock cannot exclude
+pollers from older versions that never acquired it; follow the upgrade steps
+below before replacing an older installation.
 
 ## Install
 
@@ -54,6 +58,68 @@ herdr server reload-config
 ```
 
 After installing, switch Spaces once or restart Herdr to start the plugin.
+
+## Upgrade from the older PID/directory-lock poller
+
+Restarting Herdr is **not** a stop guarantee: the old detached poller keeps
+retrying when its socket or plugin-list request fails. The new file lock cannot
+coordinate with that old process. Do not update or re-enable until all old
+pollers for this installation have exited.
+
+1. Keep the relevant Herdr session reachable, using the same socket/profile as
+   the old poller. Record the installation's `manifest_path`, then disable it:
+
+   ```sh
+   herdr plugin list --plugin viko16.git-dirty --json
+   herdr plugin disable viko16.git-dirty
+   herdr plugin list --plugin viko16.git-dirty --json |
+     jq -e '[.result.plugins[]? | select(.plugin_id == "viko16.git-dirty")] |
+       length == 1 and .[0].enabled == false'
+   ```
+
+   A successful disable changes the registry; it does not terminate detached
+   processes. The old poller checks it every ten cycles (about 30 seconds plus
+   scan/CLI time), clears its tokens and exits only after observing disabled.
+
+2. Wait at least that check interval, then inspect the full process commands:
+
+   ```sh
+   ps -ww -axo pid=,ppid=,lstart=,args= | awk '/[b]in\/poll\.sh/'
+   ```
+
+   Compare the script paths with the recorded `manifest_path` directory, and
+   check every matching poller, including any using another session/socket.
+   Repeat the check and confirm none remain for this installation. A missing
+   PID file or a successful disable response alone is not proof of exit. Do
+   not delete lock files or signal a PID copied from a PID file. If a poller
+   remains, a Git/CLI call may be stuck or its old session may be unreachable:
+   keep the plugin disabled and stop the upgrade until its exit can be verified.
+   This procedure deliberately does not automatically kill any process.
+
+3. Once the desired upstream ref includes this fix, update the stopped,
+   GitHub-managed installation and verify that it is still disabled:
+
+   ```sh
+   herdr plugin update viko16.git-dirty
+   herdr plugin list --plugin viko16.git-dirty --json |
+     jq -e '[.result.plugins[]? | select(.plugin_id == "viko16.git-dirty")] |
+       length == 1 and .[0].enabled == false'
+   ```
+
+   The update follows the installation's recorded ref; a pinned old ref will
+   not acquire this fix. Verify the installed revision/files include
+   `bin/lock.pl` and `bin/bounded.pl` before enabling. Locally linked plugins
+   must instead be updated at their recorded path while disabled and stopped.
+
+4. Enable the verified installation with `herdr plugin enable viko16.git-dirty`,
+   then switch Spaces to invoke its focus hook. Repeat the process inspection:
+   there should be one new poller per Herdr socket, with restored dirty tokens.
+
+Command syntax was checked with Herdr 0.9.5 `--help`; registry-only disable and
+preservation of the enabled flag during update were checked in its
+[plugin implementation](https://github.com/herdrdev/herdr/blob/v0.9.5/src/cli/plugin.rs)
+and [enable/disable handler](https://github.com/herdrdev/herdr/blob/v0.9.5/src/app/api/plugins/mod.rs).
+No live plugin upgrade is performed by this project's tests.
 
 ## Use
 
